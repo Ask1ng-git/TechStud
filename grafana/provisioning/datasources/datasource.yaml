@@ -1,0 +1,17 @@
+# 📄 grafana/provisioning/datasources/datasource.yaml
+
+apiVersion: 1
+
+datasources:
+  - name: PostgreSQL
+    uid: postgres-docker
+    type: postgres
+    access: proxy
+    url: postgres_db:5432
+    user: postgres
+    secureJsonData:
+      password: Evy2zm4q
+    database: mspr
+    isDefault: true
+    jsonData:
+      sslmode: disable

@@ -12,7 +12,7 @@ const app = express();
 const port = 3005;
 
 app.use(cors());
-app.use(compression());  // ✅ Active la compression Gzip
+app.use(compression())
 app.use(express.json());
 
 // Routes API

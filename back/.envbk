@@ -1,0 +1,12 @@
+DB_USER=postgres
+DB_HOST=postgres_db
+DB_NAME=mspr
+DB_PASSWORD=Evy2zm4q
+DB_PORT=5432
+JWT_SECRET=super_secret_key
+DB_USER=postgres
+DB_HOST=localhost
+DB_NAME=mspr
+DB_PASSWORD=Evy2zm4q
+DB_PORT=5432
+JWT_SECRET=super_secret_key

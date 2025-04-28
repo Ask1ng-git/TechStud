@@ -10,13 +10,13 @@ from dotenv import load_dotenv
 # 📌 Charger les variables d'environnement
 load_dotenv()
 
-# 📌 Paramètres
+#  Paramètres
 KAGGLE_DATASET = "imdevskp/corona-virus-report"
 CSV_FILE_NAME = "covid_19_clean_complete.csv"
 CSV_PATH = f"./CSV/{CSV_FILE_NAME}"
 OUTPUT_CSV = "./CSV/fullgro_cleans.csv"
 
-# 📌 Config PostgreSQL (depuis .env)
+#  Config PostgreSQL (depuis .env)
 DB_USERNAME = os.getenv("DB_USERNAME")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_HOST = os.getenv("DB_HOST")
@@ -26,30 +26,55 @@ DB_NAME = os.getenv("DB_NAME")
 # Crée le dossier CSV s'il n'existe pas
 os.makedirs('./CSV', exist_ok=True)
 
-# 📌 Fonction robuste et claire de téléchargement Kaggle
+#  Téléchargement des données depuis Kaggle
 def download_kaggle_data():
     print("📥 Téléchargement depuis Kaggle...")
     kaggle.api.dataset_download_files(KAGGLE_DATASET, path='./CSV', unzip=True)
     print("✅ Téléchargement terminé.")
 
-# 📌 Exécution ETL clairement après téléchargement
+#  Exécution de l'ETL
 def execute_etl():
-    print("⚙️ Exécution ETL...")
-    cleaned_df = etl_process(CSV_PATH, OUTPUT_CSV)
+    print("⚙️ Exécution ETL avec validation des données Train-Test-Validation...")
+    etl_process(CSV_PATH, "./CSV")  # ✅ On exécute l’ETL et la validation
     print("✅ ETL terminé.")
-    return cleaned_df
 
-# 📌 Insertion dans PostgreSQL
+
+
+def execute_etl():
+    print("⚙️ Exécution ETL avec division Train-Test-Validation...")
+    train, test, validation = etl_process(CSV_PATH, "./CSV")
+    print("✅ ETL terminé.")
+    return train, test, validation
+
+
+
+# 📌 Insertion dans PostgreSQL avec les nouveaux champs (PredictedCases & Cluster)
 def insert_into_db(df):
     print("🗃️ Insertion dans PostgreSQL...")
+
     engine = create_engine(f"postgresql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
 
-    # Insérer dans temp_statistiques
+    # ✅ Suppression et recréation de la table temporaire pour éviter les erreurs
+    with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS temp_statistiques;"))
+            conn.execute(text("""
+                CREATE TABLE temp_statistiques (
+                    "Country/Region" VARCHAR(255),
+                    "WHO Region" VARCHAR(255),
+                    Date DATE,
+                    Confirmed INTEGER,
+                    Deaths INTEGER,
+                    Recovered INTEGER,
+                    Active INTEGER,
+                );
+            """))
+
+    
     df.to_sql('temp_statistiques', engine, if_exists='replace', index=False)
-    print("✅ Données insérées dans temp_statistiques.")
+    print(" Données insérées dans temp_statistiques.")
 
     with engine.begin() as conn:
-        # ✅ Remplir pays avec who_region corrigé explicitement
+        # ✅ Remplir la table pays
         conn.execute(text("""
             INSERT INTO pays (nom_pays, who_region)
             SELECT DISTINCT "Country/Region", "WHO Region"
@@ -58,61 +83,45 @@ def insert_into_db(df):
         """))
         print("✅ Table 'pays' remplie.")
 
-
-        # ✅ Remplir statistiques_quotidiennes corrigé (avec date et who_region)
-
-        # ✅ Insertion correcte avec gestion complète des conflits
-        conn.execute(text("""
-            INSERT INTO statistiques_par_pays (id_pays, total_cases, total_deaths, total_recovered, active_cases)
-            SELECT 
-                id_pays, 
-                SUM(total_cases), 
-                SUM(total_deaths), 
-                SUM(total_recovered), 
-                SUM(active_cases)
-            FROM statistiques_quotidiennes
-            GROUP BY id_pays
-            ON CONFLICT (id_pays) DO UPDATE SET
-                total_cases = EXCLUDED.total_cases,
-                total_deaths = EXCLUDED.total_deaths,
-                total_recovered = EXCLUDED.total_recovered,
-                active_cases = EXCLUDED.active_cases;
-        """))
-        print("✅ Table statistiques_par_pays remplie avec succès.")
-
-
-
-        # ✅ Remplir statistiques_par_pays avec données agrégées depuis statistiques_quotidiennes
+        # Insertion des données dans statistiques_quotidiennes
         conn.execute(text("""
             INSERT INTO statistiques_quotidiennes (
-                id_pays, total_cases, total_deaths, total_recovered, active_cases, date, who_region
-            )
+                id_pays, confirmed, deaths, recovered, active, date, who_region)
             SELECT 
                 p.id, 
-                t."TotalCases", 
-                t."TotalDeaths", 
-                t."TotalRecovered", 
-                t."ActiveCases",
-                TO_DATE(t."Date", 'YYYY-MM-DD'),  -- ✅ format corrigé définitivement ici
-                t."WHO Region"
+                t."Confirmed",
+                t."Deaths", 
+                t."Recovered", 
+                t."Active",
+                t."Date",
+                t."WHO Region",
             FROM temp_statistiques t
             JOIN pays p ON p.nom_pays = t."Country/Region";
         """))
 
+        print("✅ Table statistiques_quotidiennes mise à jour.")
 
-        # ✅ Suppression des colonnes non nécessaires de temp_statistiques (province, lat, long, anomaly)
+
+        # ✅ Agrégation des statistiques par pays
         conn.execute(text("""
-            ALTER TABLE temp_statistiques
-            DROP COLUMN IF EXISTS "Province_State",
-            DROP COLUMN IF EXISTS "Lat",
-            DROP COLUMN IF EXISTS "Long",
-            DROP COLUMN IF EXISTS "Anomaly";
+            INSERT INTO statistiques_par_pays (id_pays, confirmed, deaths, recovered, active)
+            SELECT 
+                id_pays, 
+                SUM(confirmed), 
+                SUM(deaths), 
+                SUM(recovered), 
+                SUM(active)
+            FROM statistiques_quotidiennes
+            GROUP BY id_pays
+            ON CONFLICT (id_pays) DO UPDATE SET
+                confirmed = EXCLUDED.confirmed,
+                deaths = EXCLUDED.deaths,
+                recovered = EXCLUDED.recovered,
+                active = EXCLUDED.active;
         """))
-        print("✅ Colonnes inutiles supprimées de temp_statistiques.")
+        print("✅ Table statistiques_par_pays mise à jour.")
 
-
-
-# 📌 Création automatique de la base de données
+# 📌 Création de la base de données si elle n'existe pas
 def create_database_if_not_exists():
     engine = create_engine(f"postgresql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/postgres")
     with engine.connect() as conn:
@@ -125,7 +134,7 @@ def create_database_if_not_exists():
         else:
             print(f"✅ Base '{DB_NAME}' déjà existante.")
 
-# 📌 Création automatique des tables nécessaires
+# Création des tables avec les nouveaux champs
 def create_tables():
     engine = create_engine(f"postgresql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}")
 
@@ -141,54 +150,54 @@ def create_tables():
             CREATE TABLE IF NOT EXISTS statistiques_quotidiennes (
                 id SERIAL PRIMARY KEY,
                 id_pays INTEGER REFERENCES pays(id),
-                total_cases INTEGER,
-                total_deaths INTEGER,
-                total_recovered INTEGER,
-                active_cases INTEGER,
-                date DATE,                 -- ✅ Colonne date ajoutée
-                who_region VARCHAR(255)    -- ✅ colonne ajoutée explicitement
+                confirmed INTEGER,
+                deaths INTEGER,
+                recovered INTEGER,
+                active INTEGER,
+                date DATE,
+                who_region VARCHAR(255)
             );
         """))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS statistiques_par_pays (
                 id SERIAL PRIMARY KEY,
                 id_pays INTEGER UNIQUE REFERENCES pays(id),
-                total_cases INTEGER,
-                total_deaths INTEGER,
-                total_recovered INTEGER,
-                active_cases INTEGER
+                confirmed INTEGER,
+                deaths INTEGER,
+                recovered INTEGER,
+                active INTEGER
             );
+        """))
+        # Vérifier que temp_statistiques contient les bonnes colonnes
+        conn.execute(text("""
+            DROP TABLE IF EXISTS temp_statistiques;
         """))
         conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS temp_statistiques (
-                Province_State VARCHAR(255),
+            CREATE TABLE temp_statistiques (
                 "Country/Region" VARCHAR(255),
-                Lat FLOAT,
-                Long FLOAT,
+                "WHO Region" VARCHAR(255),
                 Date DATE,
-                TotalCases INTEGER,
-                TotalDeaths INTEGER,
-                TotalRecovered INTEGER,
-                ActiveCases INTEGER,
-                WHO_Region VARCHAR(255)
+                Confirmed INTEGER,
+                Deaths INTEGER,
+                Recovered INTEGER,
+                Active INTEGER,
+                PredictedCases INTEGER,  
+                Cluster VARCHAR(20)  
             );
         """))
-    print("✅ Toutes les tables créées correctement avec les bonnes colonnes.")
+    print(" Toutes les tables ont été vérifiées et mises à jour.")
 
 
-
-# 🏁 Exécution du pipeline complet dans le bon ordre !
+# 📌 Exécution complète du pipeline
 def main():
-    download_kaggle_data()  # ⚠️ Téléchargement AVANT ETL
-    cleaned_df = execute_etl()
-    
-    # Ajouts pour automatisation complète :
+    download_kaggle_data()
+    execute_etl()  # ✅ On exécute l'ETL mais on ne récupère pas les données
+
     create_database_if_not_exists()
     create_tables()
-    
-    if cleaned_df is not None:
-        insert_into_db(cleaned_df)
-    print("🚀 Pipeline terminé avec succès !")
+
+    print("🚀 Pipeline terminé avec succès !")  # ✅ On ne fait PAS insert_into_db()
+
 
 if __name__ == "__main__":
     main()
